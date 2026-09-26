@@ -1,4 +1,5 @@
 const STORAGE_KEY = "streamplaza-library-v1";
+const PRELOADED_PREFIX = "preloaded:";
 
 const videoInput = document.querySelector("#videoInput");
 const libraryEl = document.querySelector("#library");
@@ -13,6 +14,7 @@ const closePlayer = document.querySelector("#closePlayer");
 let library = loadLibrary();
 let activeVideo = null;
 let objectUrls = new Map();
+let preloadedVideos = [];
 
 function loadLibrary() {
   try {
@@ -24,6 +26,46 @@ function loadLibrary() {
 
 function saveLibrary() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
+}
+
+async function loadPreloadedVideos() {
+  try {
+    const response = await fetch("videos/manifest.json", { cache: "no-store" });
+    if (!response.ok) throw new Error("manifest not found");
+
+    const manifest = await response.json();
+
+    preloadedVideos = Array.isArray(manifest)
+      ? manifest
+          .filter(item => item && typeof item.name === "string" && typeof item.src === "string")
+          .map(item => ({
+            id: PRELOADED_PREFIX + item.src,
+            name: item.name,
+            size: Number(item.size) || 0,
+            position: 0,
+            duration: 0,
+            src: item.src,
+            preloaded: true
+          }))
+      : [];
+
+    for (const item of preloadedVideos) {
+      const saved = library.find(entry => entry.id === item.id);
+      if (saved) {
+        item.position = saved.position || 0;
+        item.duration = saved.duration || 0;
+      }
+    }
+
+    render();
+  } catch {
+    preloadedVideos = [];
+  }
+}
+
+function getAllVideos() {
+  const localVideos = library.filter(item => !item.preloaded);
+  return [...preloadedVideos, ...localVideos];
 }
 
 function formatBytes(bytes) {
@@ -39,7 +81,8 @@ function getId(file) {
 
 function render() {
   const query = searchInput.value.trim().toLowerCase();
-  const filtered = library.filter(item => item.name.toLowerCase().includes(query));
+  const allVideos = getAllVideos();
+  const filtered = allVideos.filter(item => item.name.toLowerCase().includes(query));
 
   libraryEl.innerHTML = "";
   emptyState.style.display = filtered.length ? "none" : "block";
@@ -57,7 +100,7 @@ function render() {
       <div class="thumbnail">▶</div>
       <div class="card-info">
         <p class="card-title" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</p>
-        <p class="card-meta">${formatBytes(item.size)} · MP4</p>
+        <p class="card-meta">${formatBytes(item.size)} · ${item.preloaded ? "Built-in" : "Local"}</p>
         <div class="progress"><div style="width:${progress}%"></div></div>
       </div>
     `;
@@ -107,27 +150,51 @@ videoInput.addEventListener("change", event => {
 });
 
 function playItem(id) {
-  const item = library.find(entry => entry.id === id);
+  const item = getAllVideos().find(entry => entry.id === id);
   if (!item) return;
 
   activeVideo = item;
 
-  if (!objectUrls.has(id)) {
-    // The browser cannot recreate a File object after a reload.
-    // Ask the user to add the file again for this session.
-    alert("This video needs to be added again after a page reload. Persistent file storage is coming next.");
-    return;
-  }
+  if (item.preloaded) {
+    playerTitle.textContent = item.name;
+    video.src = item.src;
+  } else {
+    if (!objectUrls.has(id)) {
+      alert("This video needs to be added again after a page reload. Persistent file storage is coming next.");
+      return;
+    }
 
-  playerTitle.textContent = item.name;
-  video.src = objectUrls.get(id);
-  video.currentTime = item.position || 0;
+    playerTitle.textContent = item.name;
+    video.src = objectUrls.get(id);
+  }
 
   player.classList.remove("hidden");
   player.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
 
   video.play().catch(() => {});
+}
+
+function saveProgress(item) {
+  if (!item) return;
+
+  if (item.preloaded) {
+    const saved = library.find(entry => entry.id === item.id);
+    if (saved) {
+      saved.position = item.position;
+      saved.duration = item.duration;
+    } else {
+      library.push({
+        id: item.id,
+        name: item.name,
+        position: item.position,
+        duration: item.duration,
+        preloaded: true
+      });
+    }
+  }
+
+  saveLibrary();
 }
 
 function closeVideo() {
@@ -149,13 +216,13 @@ video.addEventListener("loadedmetadata", () => {
 video.addEventListener("timeupdate", () => {
   if (!activeVideo) return;
   activeVideo.position = video.currentTime;
-  saveLibrary();
+  saveProgress(activeVideo);
 });
 
 video.addEventListener("ended", () => {
   if (!activeVideo) return;
   activeVideo.position = 0;
-  saveLibrary();
+  saveProgress(activeVideo);
   render();
 });
 
@@ -169,14 +236,19 @@ document.addEventListener("keydown", event => {
 searchInput.addEventListener("input", render);
 
 clearBtn.addEventListener("click", () => {
-  if (!library.length) return;
-  if (!confirm("Clear your StreamPlaza library?")) return;
+  const localVideos = library.filter(item => !item.preloaded);
+  if (!localVideos.length) return;
+  if (!confirm("Clear your locally added StreamPlaza videos?")) return;
 
-  for (const url of objectUrls.values()) URL.revokeObjectURL(url);
+  for (const [id, url] of objectUrls) {
+    URL.revokeObjectURL(url);
+  }
+
   objectUrls.clear();
-  library = [];
+  library = library.filter(item => item.preloaded);
   saveLibrary();
   render();
 });
 
 render();
+loadPreloadedVideos();
