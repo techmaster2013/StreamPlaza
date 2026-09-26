@@ -79,6 +79,64 @@ function getId(file) {
   return [file.name, file.size, file.lastModified].join(":");
 }
 
+function getVideoSource(item) {
+  if (item.preloaded) return item.src;
+  return objectUrls.get(item.id) || null;
+}
+
+function makeThumbnail(item, thumbnailEl) {
+  const src = getVideoSource(item);
+  if (!src) return;
+
+  const thumbVideo = document.createElement("video");
+  thumbVideo.muted = true;
+  thumbVideo.preload = "metadata";
+  thumbVideo.playsInline = true;
+  thumbVideo.src = src;
+
+  const cleanup = () => {
+    thumbVideo.pause();
+    thumbVideo.removeAttribute("src");
+    thumbVideo.load();
+  };
+
+  thumbVideo.addEventListener("loadedmetadata", () => {
+    const seekTime = Number.isFinite(thumbVideo.duration)
+      ? Math.min(2, Math.max(0, thumbVideo.duration / 3))
+      : 0;
+
+    if (seekTime === 0) {
+      capture();
+    } else {
+      thumbVideo.currentTime = seekTime;
+    }
+  }, { once: true });
+
+  thumbVideo.addEventListener("seeked", capture, { once: true });
+  thumbVideo.addEventListener("error", cleanup, { once: true });
+
+  function capture() {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 360;
+
+      const context = canvas.getContext("2d");
+      context.drawImage(thumbVideo, 0, 0, canvas.width, canvas.height);
+
+      thumbnailEl.innerHTML = "";
+      const image = document.createElement("img");
+      image.src = canvas.toDataURL("image/jpeg", 0.78);
+      image.alt = `Thumbnail for ${item.name}`;
+      thumbnailEl.appendChild(image);
+    } catch {
+      // Keep the gradient fallback if thumbnail generation fails.
+    } finally {
+      cleanup();
+    }
+  }
+}
+
 function render() {
   const query = searchInput.value.trim().toLowerCase();
   const allVideos = getAllVideos();
@@ -97,7 +155,7 @@ function render() {
       : 0;
 
     card.innerHTML = `
-      <div class="thumbnail">▶</div>
+      <div class="thumbnail"><span>▶</span></div>
       <div class="card-info">
         <p class="card-title" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</p>
         <p class="card-meta">${formatBytes(item.size)} · ${item.preloaded ? "Built-in" : "Local"}</p>
@@ -114,6 +172,7 @@ function render() {
     });
 
     libraryEl.appendChild(card);
+    makeThumbnail(item, card.querySelector(".thumbnail"));
   }
 }
 
@@ -240,7 +299,7 @@ clearBtn.addEventListener("click", () => {
   if (!localVideos.length) return;
   if (!confirm("Clear your locally added StreamPlaza videos?")) return;
 
-  for (const [id, url] of objectUrls) {
+  for (const url of objectUrls.values()) {
     URL.revokeObjectURL(url);
   }
 
